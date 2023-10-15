@@ -368,19 +368,493 @@ class generate_data():
         plt.plot(reactor_lengths, temperature, 'r-', label='temperature')
         plt.xlabel('reactor length')
         plt.ylabel('temperature')
+
         
+class NeuralNetwork(torch.nn.Module):
+    def __init__(self, input_size_NN, hidden_size_NN, output_size_NN, num_layers_NN, T0):
+        # Inheritance of the methods and attributes of the parent class 
+        super(NeuralNetwork, self).__init__()
+        
+        # Defining the hyperparameters of the neural network
+        self.input_size = input_size_NN
+        self.output_size = output_size_NN
+        self.hidden_size  = hidden_size_NN
+        self.num_layers = num_layers_NN
+        self.layers = torch.nn.ModuleList()
+        self.T0 = T0
+        
+        # Add the first, hidden and last layer to the neural network
+        self.layers.append(torch.nn.Linear(self.input_size, self.hidden_size))
+        for i in range(self.num_layers - 1):
+            self.layers.append(torch.nn.Linear(self.hidden_size, self.hidden_size))
+        self.layers.append(torch.nn.Linear(self.hidden_size, self.output_size))
     
+    # Define the forward pass
+    def forward(self, x):     
+        # All layers of the neural network are passed through
+        for layer in self.layers[:-1]:
+            x = layer(x)
+            # The activation function tanh is used to introduce non-linearity 
+            # into the neural network to solve non-linear problems.
+            x = torch.tanh(x)
+        x = self.layers[-1](x)
+        # The exponential function is used to ensure that the temperatures 
+        # are always positive. The multiplication of T0 provides a scaling of 
+        # the high temperatures to a value close to 1 -> T/T0.
+        x[:,2] = torch.exp(x[:,2]) * self.T0
+        
+        return x
+
+class PINN_loss(torch.nn.Module):
+    def __init__(self, weight_factors, epsilon, inlet_mole_fractions, \
+                 bound_conds, reactor_conds):
+        super(PINN_loss, self).__init__()
+        
+        # New parameter
+        self.w_n, self.w_T, self.w_GE_n, self.w_GE_T, self.w_IC_n, \
+            self.w_IC_T = weight_factors
+        self.epsilon = torch.tensor(epsilon)
+        
+        # Paramter known from the class generate_data()
+        self.inlet_mole_fractions = torch.tensor(inlet_mole_fractions[0:6])
+        
+        self.p = torch.tensor(bound_conds[0])
+        self.u = torch.tensor(bound_conds[1])
+        self.T0 = torch.tensor(bound_conds[2])
+        self.T_wall = torch.tensor(bound_conds[3])
+        
+        self.eta = torch.tensor(reactor_conds[0])
+        
+        self.k0 = torch.tensor([4.225*1e15*math.sqrt(1e5),1.955*1e6*1e-5,1.020*1e15*math.sqrt(1e5)])
+        self.E_A = torch.tensor([240.1*1e3,67.13*1e3,243.9*1e3])
+        self.K_ads_0 = torch.tensor([8.23*1e-5*1e-5,6.12*1e-9*1e-5,6.65*1e-4*1e-5,1.77*1e5])
+        self.G_R_ads = torch.tensor([-70.61*1e3,-82.90*1e3,-38.28*1e3,88.68*1e3])
+        self.R = torch.tensor(8.314472)
+        self.A = torch.tensor(0.0081)
+        self.rho_b = torch.tensor(1.3966*1e3)
+        self.V_dot = self.u * torch.tensor(3600) * self.A
+        
+        self.cp_coef = torch.tensor([[19.238,52.09*1e-3,11.966*1e-6,-11.309*1e-9], \
+                                     [32.22,1.9225*1e-3,10.548*1e-6,-3.594*1e-9], \
+                                     [27.124,9.267*1e-3,-13.799*1e-6,7.64*1e-9], \
+                                     [30.848,-12.84*1e-3,27.87*1e-6,-12.71*1e-9], \
+                                     [19.78,73.39*1e-3,-55.98*1e-6,17.14*1e-9], \
+                                     [31.128, -13.556*1e-3, 26.777*1e-6, -11.673*1e-9]])
+        self.H_0 = torch.tensor([-74850, -241820, 0, -110540, -393500])
+        self.S_0 = torch.tensor([-80.5467, -44.3736, 0,	89.6529, 2.9515])
+        self.MW = torch.tensor([16.043, 18.02, 2.016, 28.01, 44.01, 28.01]) * 1e-3
+        self.U_perV = torch.tensor(2.3e+05)
+    
+    def calc_inlet_ammount_of_substances(self):
+        """
+        Calculate the ammount of substances at the inlet of the PFR.
+        
+        New Params:
+            total_concentration (float): Concentration of the gas [kmol m-3]
+            concentrations (1D-array): Concentrations of all species [kmol m-3]
+            ammount_of_substances (1D-array): Ammount of substances of all species [kmol h-1]
+        """
+        total_concentration = (self.p * 1e5 * 1e-3) / (self.R*self.T0)
+        concentrations = total_concentration * self.inlet_mole_fractions
+        ammount_of_substances = concentrations * self.V_dot
+        
+        self.n_CH4_0 = ammount_of_substances[0]
+        self.n_H2O_0 = ammount_of_substances[1]
+        self.n_H2_0 = ammount_of_substances[2]
+        self.n_CO_0 = ammount_of_substances[3]
+        self.n_CO2_0 = ammount_of_substances[4]
+        self.n_N2_0 = ammount_of_substances[5]
+    
+    def calculate_thermo_properties(self):
+        """
+        Calculation of the reaction enthalpies and the equilibrium constants Kp.
+        The temperature dependence of the heat capacity is considered with NASA 
+        polynomials in order to consider the temperature dependence of the 
+        enthalpies of formation and the entropies of formation. 
+        
+        New Params:
+            H_i (1D-array): enthalpies of formation [J mol-1]
+            S_i (1D-array): entropies of formation [J mol-1 K-1]
+            H_R (1D-array): reaction enthalpies [J mol-1]
+            S_R (1D-array): reaction entropies [J mol-1 K-1]
+            G_R (1D-array): reaction gibbs energies [J mol-1]
+            Kp (1D-array): equilibrium constant, Kp[1,3]=[Pa], Kp[2]=[-]
+        """
+        
+        # Calculation of the standard formation enthalpy at given temperature
+        # with Kirchhoffsches law
+        H_i = torch.unsqueeze(self.H_0, 1).repeat(1, self.T.size(0)) + \
+                torch.matmul(self.cp_coef[:5,:], torch.cat([torch.transpose(t, 0, 1) for t in \
+                [self.T, (1/2)*self.T**2, (1/3)*self.T**3, (1/4)*(self.T)**4]], dim=0)) - \
+                torch.matmul(self.cp_coef[:5,:], torch.cat([torch.transpose(t, 0, 1) for t in \
+                [torch.full((self.T.size(0), 1), 298.15), (1/2)*torch.full((self.T.size(0), 1), 298.15)**2, \
+                (1/3)*torch.full((self.T.size(0), 1), 298.15)**3, (1/4)*torch.full((self.T.size(0), 1), 298.15)**4]], dim=0))
+            
+        # Calculation of the standard formation entropy at given temperature
+        S_i = torch.unsqueeze(self.S_0, 1).repeat(1, self.T.size(0)) + \
+                torch.matmul(self.cp_coef[:5,:], torch.cat([torch.transpose(t, 0, 1) for t in \
+                [torch.log(self.T), self.T, (1/2)*self.T**2, (1/3)*self.T**3]], dim=0)) - \
+                torch.matmul(self.cp_coef[:5,:], torch.cat([torch.transpose(t, 0, 1) for t in \
+                [torch.log(torch.full((self.T.size(0), 1), 298.15)), torch.full((self.T.size(0), 1), 298.15), \
+                (1/2)*torch.full((self.T.size(0), 1), 298.15)**2, (1/3)*torch.full((self.T.size(0), 1), 298.15)**3]], dim=0))
+                
+        # Calculation of standard reaction enthalpies with Satz von Hess at 
+        # standard conditions (T = 298.15 K)
+        H_R = torch.zeros(3, 100)
+        H_R[0,:] = -H_i[0,:] - H_i[1,:] + H_i[3,:] + 3*H_i[2,:]
+        H_R[1,:] = -H_i[3,:] - H_i[1,:] + H_i[4,:] + H_i[2,:]
+        H_R[2,:] = -H_i[0,:] - 2*H_i[1,:] + H_i[4,:] + 4*H_i[2,:]
+        
+        # Calculation of standard reaction entropies with Satz von Hess at 
+        # standard conditions (T = 298.15 K)
+        S_R = torch.zeros(3, 100)
+        S_R[0,:] = -S_i[0,:] - S_i[1,:] + S_i[3,:] + 3*S_i[2,:]
+        S_R[1,:] = -S_i[3,:] - S_i[1,:] + S_i[4,:] + S_i[2,:]
+        S_R[2,:] = -S_i[0,:] - 2*S_i[1,:] + S_i[4,:] + 4*S_i[2,:]
+        
+        # Calculation of the free reaction enthalpy with the Gibbs Helmoltz equation
+        G_R = H_R - self.T.t() * S_R
+        
+        # Calculation of the rate constants
+        Kp = torch.exp(-G_R / (self.R*self.T.t())) * torch.cat((torch.full((1, 100), 1e10), \
+                torch.full((1, 100), 1), torch.full((1, 100), 1e10)), dim=0)
+        
+        return [Kp.t(), H_R.t()]
+                                                   
+
+    def xu_froment(self, partial_pressures):
+        """
+        Calculation of the differentials from the mass balance with the kinetic 
+        approach of Xu, Froment.
+        
+        Args:
+            partial_pressures (1D-array): partial pressures [Pa]
+        New Params:
+            k (list): velocity constant, k[1,3]=[kmol Pa0.5 kgcat-1 h-1]
+                                         k[2]=[kmol Pa-1 kgcat-1 h-1]
+            K_ads (1D-array): adsorption constants, K_ads[1-3]=[Pa-1]
+            r_total (1D-array): reaction rates [kmol kgcat-1 h-1]
+            dn_dz (1D-array): derivatives of the amounts of substances of the 
+                              species in dependence of the reactor length [kmol m-1 h-1]
+        """
+        
+        # Calculate reaction rates with a Langmuir-Hinshelwood-Houghen-Watson approach
+        k = self.k0.expand(self.T.size(0), -1) * torch.exp(-self.E_A.expand(self.T.size(0), -1)/(self.R*self.T))
+        K_ads = self.K_ads_0.expand(self.T.size(0), -1) * torch.exp(-self.G_R_ads.expand(self.T.size(0), -1)/(self.R*self.T))
+        Kp, H_R = PINN_loss.calculate_thermo_properties(self)
+        
+        DEN = 1 + partial_pressures[:,3]*K_ads[:,0] + partial_pressures[:,2]*K_ads[:,1] + \
+            partial_pressures[:,0]*K_ads[:,2] + (partial_pressures[:,1]*K_ads[:,3]) / partial_pressures[:,2]
+        r_total = torch.zeros(100, 3)
+        r_total[:,0] = (k[:,0] / (partial_pressures[:,2]**2.5)) * (partial_pressures[:,0] * \
+                        partial_pressures[:,1] - (((partial_pressures[:,2]**3) * partial_pressures[:,3]) / \
+                        Kp[:,0])) / (DEN**2)
+        r_total[:,1] = (k[:,1] / partial_pressures[:,2]) * (partial_pressures[:,3] * \
+                        partial_pressures[:,1] - ((partial_pressures[:,2] * partial_pressures[:,4]) / \
+                        Kp[:,1])) / (DEN**2)
+        r_total[:,2] = (k[:,2] / (partial_pressures[:,2]**3.5)) * (partial_pressures[:,0] * \
+                        (partial_pressures[:,1]**2) - (((partial_pressures[:,2]**4) * partial_pressures[:,4]) / \
+                        Kp[:,2])) / (DEN**2)
+        
+        # Calculate derivatives for the mass balance
+        dn_dz = torch.zeros(100, 5)
+        dn_dz[:,0] = self.eta * self.A * (-r_total[:,0] - r_total[:,2]) * self.rho_b
+        dn_dz[:,1] = self.eta * self.A * (-r_total[:,0] - r_total[:,1] - 2*r_total[:,2]) * self.rho_b
+        dn_dz[:,2] = self.eta * self.A * (3*r_total[:,0] + r_total[:,1] + 4*r_total[:,2]) * self.rho_b
+        dn_dz[:,3] = self.eta * self.A * (r_total[:,0] - r_total[:,1]) * self.rho_b
+        dn_dz[:,4] = self.eta * self.A * (r_total[:,1] + r_total[:,2]) * self.rho_b
+
+        return [dn_dz, r_total]
+    
+    def heat_balance(self, r_total, u_gas):
+        """
+        Calculation of the derivatives of the temperature according to the 
+        reactor length.
+
+        Args:
+            r_total (1D-array): reaction rates [kmol kgcat-1 h-1]
+            u_gas (float): flow velocity of the gas [m s-1]
+            
+        New Params:
+            s_H (1D-array): heat production rate through the reaction [J m-3 h-1]
+            density_gas (float): density of the gas [kg m-3]
+            cp (1D-array): heat capacities of the species [J mol-1 K-1]
+            s_H_ext (float): heat exchange rate with environment [J m-3 h-1]
+            dTdz (float): derivatives of the temperature in dependence of the 
+                          reactor length [K m-1]
+        """
+        
+        ## Heat balance
+        # Calculation of the source term for the reaction
+        Kp, H_R = PINN_loss.calculate_thermo_properties(self)
+        s_H = -(H_R * 1e3) * self.eta * r_total * self.rho_b
+        
+        # Calculation of the source term for external heat exchange
+        density_gas = torch.sum(self.p * 1e5 * self.mole_fractions * \
+            self.MW.unsqueeze(0).expand(100, -1), dim=1).unsqueeze(1) / (self.R * self.T)
+        cp = self.cp_coef[:,0].unsqueeze(0).expand(100, -1) + \
+            self.cp_coef[:,1].unsqueeze(0).expand(100, -1) * self.T + \
+            self.cp_coef[:,2].unsqueeze(0).expand(100, -1) * self.T**2 + \
+            self.cp_coef[:,3].unsqueeze(0).expand(100, -1) * self.T**3
+        s_H_ext = -self.U_perV * 1e3 * (self.T - self.T_wall)
+        
+        # Calculate derivative for the heat balance
+        dT_dz = (torch.sum(s_H,dim=1)+s_H_ext.squeeze()) / (u_gas * 3.6 * \
+            torch.sum(self.mole_fractions*(cp/self.MW),dim=1) * density_gas.squeeze(1) * 1e3)
+        
+        return dT_dz
+    
+    def calc_IC_loss(self, y_pred, x):
+        
+        # Calculation of the mean square displacement between the predicted and 
+        # original initial conditions
+        loss_IC_CH4 = (y_pred[0, 0] - self.n_CH4_0)**2
+        loss_IC_H2O = (y_pred[0, 1] - self.n_H2O_0)**2
+        loss_IC_H2 = (y_pred[0, 2] - self.n_H2_0)**2
+        loss_IC_CO = (y_pred[0, 3] - self.n_CO_0)**2
+        loss_IC_CO2 = (y_pred[0, 4] - self.n_CO2_0)**2
+        loss_IC_T = (y_pred[0, 5] - self.T0)**2
+        
+        return [loss_IC_CH4, loss_IC_H2O, loss_IC_H2, loss_IC_CO, loss_IC_CO2, loss_IC_T]
+    
+    def calc_GE_loss(self, y_pred, x):
+           
+        # Calculate the gradients of tensor values
+        dn_dz_CH4 = torch.autograd.grad(outputs=y_pred[:, 0], inputs=x,
+                                grad_outputs=torch.ones_like(y_pred[:, 0]),
+                                retain_graph=True, create_graph=True)[0]
+        dn_dz_H2O = torch.autograd.grad(outputs=y_pred[:, 1], inputs=x,
+                                grad_outputs=torch.ones_like(y_pred[:, 1]),
+                                retain_graph=True, create_graph=True)[0]     
+        dn_dz_H2 = torch.autograd.grad(outputs=y_pred[:, 2], inputs=x,
+                                grad_outputs=torch.ones_like(y_pred[:, 2]),
+                                retain_graph=True, create_graph=True)[0]  
+        dn_dz_CO = torch.autograd.grad(outputs=y_pred[:, 3], inputs=x,
+                                grad_outputs=torch.ones_like(y_pred[:, 3]),
+                                retain_graph=True, create_graph=True)[0]  
+        dn_dz_CO2 = torch.autograd.grad(outputs=y_pred[:, 4], inputs=x,
+                                grad_outputs=torch.ones_like(y_pred[:, 4]),
+                                retain_graph=True, create_graph=True)[0]  
+        dT_dz = torch.autograd.grad(outputs=y_pred[:, 5], inputs=x,
+                                grad_outputs=torch.ones_like(y_pred[:, 5]),
+                                retain_graph=True, create_graph=True)[0]
+        
+        # Calculation of the differentials
+        # Calculate the mole fractions
+        self.mole_fractions = torch.cat([y_pred[:,:5], model.n_N2_0*torch.ones(100, 1)], dim=1)/ \
+            torch.sum(torch.cat([y_pred[:,:5], model.n_N2_0*torch.ones(100, 1)], dim=1), dim=1).view(-1, 1)
+        
+        #### Vorsicht! rausnehmen
+        #self.mole_fractions[:,0] = 2.1280e-01
+        #self.mole_fractions[:,1] = 7.1400e-01
+        #self.mole_fractions[:,2] = 2.5900e-02
+        #self.mole_fractions[:,3] = 4.0000e-04
+        #self.mole_fractions[:,4] = 1.1900e-02
+        #self.mole_fractions[:,5] = 0.035
+        
+        #### Vorsicht! rausnehmen
+        #self.T.fill_(self.T0)
+        
+        # Consider dependence of temperature and gas composition of the flow velocity
+        u_gas = self.u * (self.T/self.T0) * (torch.sum(torch.unsqueeze( \
+                    self.inlet_mole_fractions,dim=0).expand(self.T.size(0), -1)*self.MW, dim=1) / \
+                    torch.sum(self.mole_fractions*self.MW, dim=1)).unsqueeze(1)
+        
+        # Calculate partial pressures
+        partial_pressures = self.p * 1e5 * self.mole_fractions
+        
+        #### Vorsicht! rausnehmen
+        #partial_pressures[:,0] = 5.46896e+05
+        #partial_pressures[:,1] = 1.83498e+06
+        #partial_pressures[:,2] = 6.65630e+04
+        #partial_pressures[:,3] = 1.02800e+03
+        #partial_pressures[:,4] = 3.05830e+04
+        #u_gas = 2.1400
+        
+        dn_dz_pred, r_total_pred = PINN_loss.xu_froment(self, partial_pressures)
+        dT_dz_pred = PINN_loss.heat_balance(self, r_total_pred, u_gas)
+        
+        # Calculation of the mean square displacement between the gradients of 
+        # autograd and differentials of the mass and heat balances
+        loss_GE_CH4 = (dn_dz_CH4 - dn_dz_pred[:,0].unsqueeze(1))**2
+        loss_GE_H2O = (dn_dz_H2O - dn_dz_pred[:,1].unsqueeze(1))**2
+        loss_GE_H2 = (dn_dz_H2 - dn_dz_pred[:,2].unsqueeze(1))**2
+        loss_GE_CO = (dn_dz_CO - dn_dz_pred[:,3].unsqueeze(1))**2
+        loss_GE_CO2 = (dn_dz_CO2 - dn_dz_pred[:,4].unsqueeze(1))**2
+        loss_GE_T = (dT_dz - dT_dz_pred.unsqueeze(1))**2
+        
+        return [loss_GE_CH4, loss_GE_H2O, loss_GE_H2, loss_GE_CO, loss_GE_CO2, loss_GE_T]
+    
+    def causal_training(self, x, loss_IC_CH4, loss_IC_H2O, loss_IC_H2, \
+                        loss_IC_CO, loss_IC_CO2, loss_IC_T, loss_GE_CH4, \
+                        loss_GE_H2O, loss_GE_H2, loss_GE_CO, loss_GE_CO2, \
+                        loss_GE_T):
+        
+        # Form the sum of the losses
+        losses = torch.zeros_like(x)
+        losses[0,0] = loss_IC_CH4 + loss_IC_H2O + loss_IC_H2 + loss_IC_CO + \
+            loss_IC_CO2 + loss_IC_T + loss_GE_CH4[0] + loss_GE_H2O[0] + \
+                loss_GE_H2[0] + loss_GE_CO[0] + loss_GE_CO2[0] + loss_GE_T[0]
+        losses[1:] = loss_GE_CH4[1:] + loss_GE_H2O[1:] + loss_GE_H2[1:] + \
+            loss_GE_CO[1:] + loss_GE_CO2[1:] + loss_GE_T[1:]
+        
+        # Calculate the weighting factors of the losses
+        weight_factors = torch.zeros_like(x)
+        for i in range(x.size(0)):
+            w_i = torch.exp(-self.epsilon*torch.sum(losses[0:i]))
+            weight_factors[i] = w_i
+        self.weight_factors = weight_factors
+        
+        # Consider the weighting factors in the losses
+        total_loss = torch.mean(weight_factors * losses)
+            
+        return total_loss
+         
+    def forward(self, x, y, y_pred):
+        
+        # Calculation of the total loss
+        self.T = y_pred[:, 5].reshape(-1, 1)
+        
+        loss_IC_CH4, loss_IC_H2O, loss_IC_H2, loss_IC_CO, \
+            loss_IC_CO2, loss_IC_T = self.calc_IC_loss(y_pred, x)
+        loss_GE_CH4, loss_GE_H2O, loss_GE_H2, loss_GE_CO, \
+            loss_GE_CO2, loss_GE_T = self.calc_GE_loss(y_pred, x)
+        
+        # Store losses before weighting
+        losses_before_weighting = np.array([np.mean(loss_IC_CH4.detach().numpy()), \
+                                   np.mean(loss_IC_H2O.detach().numpy()), \
+                                   np.mean(loss_IC_H2.detach().numpy()), \
+                                   np.mean(loss_IC_CO.detach().numpy()), \
+                                   np.mean(loss_IC_CO2.detach().numpy()), \
+                                   np.mean(loss_IC_T.detach().numpy()), \
+                                   np.mean(loss_GE_CH4.detach().numpy()), \
+                                   np.mean(loss_GE_H2O.detach().numpy()), \
+                                   np.mean(loss_GE_H2.detach().numpy()), \
+                                   np.mean(loss_GE_CO.detach().numpy()), \
+                                   np.mean(loss_GE_CO2.detach().numpy()), \
+                                   np.mean(loss_GE_T.detach().numpy())])
+
+        # Consider weighting factors of the loss functions
+        loss_IC_CH4 = self.w_IC_n * self.w_n * loss_IC_CH4
+        loss_IC_H2O = self.w_IC_n * self.w_n * loss_IC_H2O
+        loss_IC_H2 = self.w_IC_n * self.w_n * loss_IC_H2
+        loss_IC_CO = self.w_IC_n * self.w_n * loss_IC_CO
+        loss_IC_CO2 = self.w_IC_n * self.w_n * loss_IC_CO2
+        loss_IC_T = self.w_IC_T * self.w_T * loss_IC_T
+        loss_GE_CH4 = self.w_GE_n * self.w_n * loss_GE_CH4
+        loss_GE_H2O = self.w_GE_n * self.w_n * loss_GE_H2O
+        loss_GE_H2 = self.w_GE_n * self.w_n * loss_GE_H2
+        loss_GE_CO = self.w_GE_n * self.w_n * loss_GE_CO
+        loss_GE_CO2 = self.w_GE_n * self.w_n * loss_GE_CO2
+        loss_GE_T = self.w_GE_T * self.w_T * loss_GE_T
+        
+        # Store losses after weighting
+        losses_after_weighting = np.array([np.mean(loss_IC_CH4.detach().numpy()), \
+                                   np.mean(loss_IC_H2O.detach().numpy()), \
+                                   np.mean(loss_IC_H2.detach().numpy()), \
+                                   np.mean(loss_IC_CO.detach().numpy()), \
+                                   np.mean(loss_IC_CO2.detach().numpy()), \
+                                   np.mean(loss_IC_T.detach().numpy()), \
+                                   np.mean(loss_GE_CH4.detach().numpy()), \
+                                   np.mean(loss_GE_H2O.detach().numpy()), \
+                                   np.mean(loss_GE_H2.detach().numpy()), \
+                                   np.mean(loss_GE_CO.detach().numpy()), \
+                                   np.mean(loss_GE_CO2.detach().numpy()), \
+                                   np.mean(loss_GE_T.detach().numpy())])
+        
+        # Calculate the total loss
+        total_loss = PINN_loss.causal_training(self, x, loss_IC_CH4, loss_IC_H2O, \
+                        loss_IC_H2, loss_IC_CO, loss_IC_CO2, loss_IC_T, loss_GE_CH4, \
+                            loss_GE_H2O, loss_GE_H2, loss_GE_CO, loss_GE_CO2, loss_GE_T)
+        
+        return [total_loss, losses_before_weighting, losses_after_weighting]
+
+def train(x, y, network, calc_loss, optimizer, num_epochs):
+    def closure():
+        """
+        The Closure function is required for the L-BFGS optimiser.
+        """
+        # Set gradient to zero
+        if torch.is_grad_enabled():
+            optimizer.zero_grad()
+            
+        # Forward pass
+        ypred = network(x)
+        
+        # Compute loss
+        total_loss, losses_before_weighting, losses_after_weighting = \
+            calc_loss(x, y, ypred)
+        
+        # Backward pass
+        if total_loss.requires_grad:
+            total_loss.backward()
+
+        return total_loss
+    
+    # Training loop
+    calc_loss.calc_inlet_ammount_of_substances()
+    
+    loss_values = np.zeros((num_epochs,13))
+    for epoch in range(num_epochs):
+        # Updating the network parameters with calculated losses and gradients 
+        # from the closure-function
+        optimizer.step(closure)
+
+        # Calculation of the current total loss after updating the network parameters 
+        # in order to print them in the console afterwards and plot them.
+        total_loss, losses_before_weighting, losses_after_weighting = \
+            calc_loss(x, y, network(x))
+        loss_values[epoch,:] = np.hstack((np.array(total_loss.detach().numpy()),\
+                                          losses_before_weighting,losses_after_weighting))
+
+        print('Epoch: ', epoch+1, 'Loss: ', total_loss.item(), 'causal weights sum: ', \
+              np.round(np.sum(calc_loss.weight_factors.detach().numpy()),decimals=4))
+                
+    return [loss_values]    
         
 if __name__ == "__main__":
     # Define parameters for the model
-    reactor_lengths = np.linspace(0,12,num=1000)
+    reactor_lengths = np.linspace(0,12,num=100)
     inlet_mole_fractions = [0.2128,0.714,0.0259,0.0004,0.0119,0.035] #CH4,H20,H2,CO,CO2,N2
     bound_conds = [25.7,2.14,793,1100] #p,u,T_in,T_wall
     reactor_conds = [0.007] #eta
     
     plot_analytical_solution = False #True,False
     
+    input_size_NN = 1
+    hidden_size_NN = 32
+    output_size_NN = 6
+    num_layers_NN = 3
+    num_epochs = 100
+    weight_factors = [1,1,1,1,1,1] #w_n,w_T,w_GE_n,w_GE_T,w_IC_n,w_IC_T
+    epsilon = 0 #epsilon=0: old model, epsilon!=0: new model, optimized value: 2
+    plot_interval = 10 # Plotting during NN-training
+    
+    
     # Calculation of the analytical curves
     model = generate_data(inlet_mole_fractions, bound_conds, reactor_conds)
     model.solve_ode(reactor_lengths, plot=plot_analytical_solution)
     
+    # Set up the neural network
+    network = NeuralNetwork(input_size_NN=input_size_NN, hidden_size_NN=hidden_size_NN,\
+                            output_size_NN=output_size_NN, num_layers_NN=num_layers_NN,\
+                            T0 = bound_conds[2])
+    optimizer = torch.optim.LBFGS(network.parameters(), lr=1, line_search_fn= \
+                                  "strong_wolfe", max_eval=None, tolerance_grad \
+                                      =1e-50, tolerance_change=1e-50)
+        
+    x = torch.tensor(reactor_lengths.reshape(-1, 1), requires_grad=True)
+    y = None
+    
+    # Train the neural network
+    calc_loss = PINN_loss(weight_factors, epsilon, inlet_mole_fractions, \
+                          bound_conds, reactor_conds) 
+    loss_values = train(x, y, network, calc_loss, optimizer, num_epochs)
+
+    # Predict data with the trained neural network
+    y_pred = network(x)
+    # Convert the pytorch tensor to a numpy array
+    y_pred = y_pred.detach().numpy()
+    
+    # Save model parameters
+    #torch.save(network.state_dict(), 'PINN_state_03.10.23.pth')

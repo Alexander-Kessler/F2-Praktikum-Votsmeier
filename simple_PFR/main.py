@@ -320,7 +320,7 @@ class PINN_loss(torch.nn.Module):
         self.n_N20 = n_N20
         self.epsilon = torch.tensor(epsilon)
         
-        # Paramter known from the class generate_data()
+        # Parameter known from the class generate_data()
         self.u = torch.tensor(bound_conds[1])
         self.k01 = torch.tensor(species_conds[0])
         self.E_A1 = torch.tensor(species_conds[1])
@@ -483,14 +483,9 @@ class PINN_loss(torch.nn.Module):
         optimised one after the other by considering weighting factors for the 
         individual points. The idea behind this is that the points are related 
         to each other and the error in the points at the beginning has an 
-        influence on the points later and thus accumulates. For this reason, 
-        the prediction by the neural network has so far been very good at the 
-        beginning and very bad at the end of the points. 
-        
-        Args:
-            x (tensor): Input values. Here reactor length.
-            loss_IC_A (tensor):
-            epsilon (float): causality parameter
+        influence on the error in the points later and thus accumulates. For 
+        this reason, the prediction by the neural network has so far been very 
+        good at the beginning and very bad at the end of the points. 
         """
         
         # Form the sum of the losses

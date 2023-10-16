@@ -341,13 +341,16 @@ class generate_data():
         # Calculate mole fractions
         generate_data.calc_mole_fractions_results(self, y[:,:6])
         
+        # Store temperature
+        self.T = y[:,6]
+        
         # Plotting results from the ODE-Solver
         if plot:
-            generate_data.plot(self, reactor_lengths, y[:,6])
+            generate_data.plot(self, reactor_lengths)
             
         return y
     
-    def plot(self, reactor_lengths, temperature):
+    def plot(self, reactor_lengths):
         """
         Plotting results from the ODE-Solver.
         """
@@ -365,7 +368,7 @@ class generate_data():
         
         # Temperature plot
         plt.figure()
-        plt.plot(reactor_lengths, temperature, 'r-', label='temperature')
+        plt.plot(reactor_lengths, self.T, 'r-', label='temperature')
         plt.xlabel('reactor length')
         plt.ylabel('temperature')
 
@@ -398,10 +401,15 @@ class NeuralNetwork(torch.nn.Module):
             # into the neural network to solve non-linear problems.
             x = torch.tanh(x)
         x = self.layers[-1](x)
-        # The exponential function is used to ensure that the temperatures 
+        # The exponential function is used to ensure that the quantities 
         # are always positive. The multiplication of T0 provides a scaling of 
         # the high temperatures to a value close to 1 -> T/T0.
-        x[:,2] = torch.exp(x[:,2]) * self.T0
+        x[:,0] = torch.exp(x[:,0])
+        x[:,1] = torch.exp(x[:,1])
+        x[:,2] = torch.exp(x[:,2])
+        x[:,3] = torch.exp(x[:,3])
+        x[:,4] = torch.exp(x[:,4])
+        x[:,5] = torch.exp(x[:,5]) * self.T0
         
         return x
 
@@ -599,7 +607,7 @@ class PINN_loss(torch.nn.Module):
         s_H_ext = -self.U_perV * 1e3 * (self.T - self.T_wall)
         
         # Calculate derivative for the heat balance
-        dT_dz = (torch.sum(s_H,dim=1)+s_H_ext.squeeze()) / (u_gas * 3.6 * \
+        dT_dz = (torch.sum(s_H,dim=1)+s_H_ext.squeeze()) / (u_gas.squeeze() * 3.6 * \
             torch.sum(self.mole_fractions*(cp/self.MW),dim=1) * density_gas.squeeze(1) * 1e3)
         
         return dT_dz
@@ -656,7 +664,7 @@ class PINN_loss(torch.nn.Module):
         #self.T.fill_(self.T0)
         
         # Consider dependence of temperature and gas composition of the flow velocity
-        u_gas = self.u * (self.T/self.T0) * (torch.sum(torch.unsqueeze( \
+        u_gas = self.u * (self.T/self.T0.expand(self.T.size(0), 1)) * (torch.sum(torch.unsqueeze( \
                     self.inlet_mole_fractions,dim=0).expand(self.T.size(0), -1)*self.MW, dim=1) / \
                     torch.sum(self.mole_fractions*self.MW, dim=1)).unsqueeze(1)
         
@@ -769,7 +777,11 @@ class PINN_loss(torch.nn.Module):
         
         return [total_loss, losses_before_weighting, losses_after_weighting]
 
-def train(x, y, network, calc_loss, optimizer, num_epochs):
+def train(x, y, network, calc_loss, optimizer, num_epochs, analytical_solution_x_CH4, \
+          analytical_solution_x_H20, analytical_solution_x_H2, analytical_solution_x_CO, \
+          analytical_solution_x_CO2, analytical_solution_x_N2, analytical_solution_T, \
+          n_N2_0, plot_interval):
+    
     def closure():
         """
         The Closure function is required for the L-BFGS optimiser.
@@ -791,10 +803,42 @@ def train(x, y, network, calc_loss, optimizer, num_epochs):
 
         return total_loss
     
+    def prepare_plots_folder():
+        """
+        This function is executed at the beginning of the training to prepare 
+        the folder with the plots. It checks whether the folder for the plots 
+        is existing. If it does not exist, the folder is created. If it is 
+        exists, all files in the folder are deleted.
+        """
+        
+        # Path to the folder with the Python script
+        script_folder = os.path.dirname(os.path.abspath(__file__))
+        folder_name = "plots"
+        folder_path = os.path.join(script_folder, folder_name)
+        
+        # Check if the folder exists
+        if not os.path.exists(folder_path):
+            # Create folder if it does not exist
+            os.makedirs(folder_path)
+        else:
+            # Delete files in the folder if it exists
+            for file_name in os.listdir(folder_path):
+                file_path = os.path.join(folder_path, file_name)
+                try:
+                    if os.path.isfile(file_path):
+                        os.unlink(file_path)
+                except Exception as e:
+                    print(f"Fehler beim Löschen der Datei {file_path}: {e}")
+        
+        print(f"Der Ordner '{folder_name}' wurde überprüft und gegebenenfalls erstellt bzw. geleert.")
+    
+    # Prepare folders for the plots 
+    prepare_plots_folder()
+    
     # Training loop
     calc_loss.calc_inlet_ammount_of_substances()
     
-    loss_values = np.zeros((num_epochs,13))
+    loss_values = np.zeros((num_epochs,25))
     for epoch in range(num_epochs):
         # Updating the network parameters with calculated losses and gradients 
         # from the closure-function
@@ -809,8 +853,157 @@ def train(x, y, network, calc_loss, optimizer, num_epochs):
 
         print('Epoch: ', epoch+1, 'Loss: ', total_loss.item(), 'causal weights sum: ', \
               np.round(np.sum(calc_loss.weight_factors.detach().numpy()),decimals=4))
-                
+        
+        # Create plots in the given plot_interval
+        if (epoch+1)%plot_interval == 0 or epoch == 0:
+            y_pred = network(x)
+            y_pred = y_pred.detach().numpy()
+            y_pred = np.insert(y_pred, 2, n_N2_0, axis=1)
+            predicted_x_CH4, predicted_x_H20, predicted_x_H2, predicted_x_CO, \
+                predicted_x_CO2, predicted_x_N2 = calc_mole_frac(y_pred[:,:6])
+            predicted_T = y_pred[:, 6]
+            
+            plots(x.detach().numpy(),analytical_solution_x_CH4, analytical_solution_x_H20, \
+                  analytical_solution_x_H2, analytical_solution_x_CO, analytical_solution_x_CO2, \
+                  analytical_solution_x_N2, analytical_solution_T, predicted_x_CH4, predicted_x_H20, \
+                  predicted_x_H2, predicted_x_CO, predicted_x_CO2, predicted_x_N2, predicted_T, save_plot=True, \
+                        plt_num=epoch+1, weight_factors=calc_loss.weight_factors)
+            
     return [loss_values]    
+
+def calc_mole_frac(n_matrix):
+    """
+    Calculate mole fractions from the ammount of substances. Takes into account 
+    only two species.
+    
+    Args:
+        n_matrix (2D-array): ammount of substance from species A and B in 
+                             dependence of the reactor length
+    """
+
+    x_CH4 = n_matrix[:,0]/np.sum(n_matrix, axis=1)
+    x_H20 = n_matrix[:,1]/np.sum(n_matrix, axis=1)
+    x_H2 = n_matrix[:,2]/np.sum(n_matrix, axis=1)
+    x_CO = n_matrix[:,3]/np.sum(n_matrix, axis=1)
+    x_CO2 = n_matrix[:,4]/np.sum(n_matrix, axis=1)
+    x_N2 = n_matrix[:,5]/np.sum(n_matrix, axis=1)
+    
+    return [x_CH4,x_H20,x_H2,x_CO,x_CO2,x_N2]
+
+def plots(reactor_lengths, analytical_solution_x_CH4, analytical_solution_x_H20, \
+      analytical_solution_x_H2, analytical_solution_x_CO, analytical_solution_x_CO2, \
+      analytical_solution_x_N2, analytical_solution_T, predicted_x_CH4, predicted_x_H20, \
+      predicted_x_H2, predicted_x_CO, predicted_x_CO2, predicted_x_N2, predicted_T, \
+      save_plot=False, plt_num=None, weight_factors=None, loss_values=None, msd_NN=None):
+    """
+    This function is used to save the plots during the training and to plot 
+    them after the training. 
+
+    """
+    # Path to the folder with the plots
+    script_folder = os.path.dirname(os.path.abspath(__file__))
+    folder_name = "plots"
+    folder_path = os.path.join(script_folder, folder_name)
+    
+    # Mole fractions plot
+    plt.figure()
+    plt.plot(reactor_lengths, analytical_solution_x_CH4, 'g-', label=r'$x_{\rm{CH_{4}}}$')
+    plt.scatter(reactor_lengths, predicted_x_CH4, color = 'g', s=12, alpha=0.8, \
+                edgecolors='b', label=r'$x_{\rm{CH_{4},pred}}$')
+    plt.plot(reactor_lengths, analytical_solution_x_H20, 'r-', label=r'$x_{\rm{H_{2}O}}$')
+    plt.scatter(reactor_lengths, predicted_x_H20, color = 'r', s=12, alpha=0.8, \
+                edgecolors='b', label=r'$x_{\rm{H_{2}O,pred}}$')
+    plt.plot(reactor_lengths, analytical_solution_x_H2, 'm-', label=r'$x_{\rm{H_{2}}}$')
+    plt.scatter(reactor_lengths, predicted_x_H2, color = 'm', s=12, alpha=0.8, \
+                edgecolors='b', label=r'$x_{\rm{H_{2},pred}}$')
+    plt.plot(reactor_lengths, analytical_solution_x_CO, 'c-', label=r'$x_{\rm{CO}}$')
+    plt.scatter(reactor_lengths, predicted_x_CO, color = 'c', s=12, alpha=0.8, \
+                edgecolors='b', label=r'$x_{\rm{CO,pred}}$')
+    plt.plot(reactor_lengths, analytical_solution_x_CO2, 'y-', label=r'$x_{\rm{CO_{2}}}$')
+    plt.scatter(reactor_lengths, predicted_x_CO2, color = 'y', s=12, alpha=0.8, \
+                edgecolors='b', label=r'$x_{\rm{CO_{2},pred}}$')
+    plt.plot(reactor_lengths, analytical_solution_x_N2, 'b-', label=r'$x_{\rm{N_{2}}}$')
+    plt.scatter(reactor_lengths, predicted_x_N2, color = 'b', s=12, alpha=0.8, \
+                edgecolors='b', label=r'$x_{\rm{N_{2},pred}}$')
+    plt.xlabel(r'$reactor\:length\:/\:\rm{m}$')
+    plt.ylabel(r'$mole\:fractions$')
+    plt.ylim(0,0.75)
+    plt.legend(loc='center right')
+        
+    if save_plot:
+        plt.savefig(f'{folder_path}/mole_fraction_{plt_num}.png', dpi=200)
+        plt.close()
+        
+    # Temperature plot
+    plt.figure()
+    plt.plot(reactor_lengths, analytical_solution_T, 'r-', label=r'$T$')
+    plt.scatter(reactor_lengths, predicted_T, color = 'g', s=12, alpha=0.8, \
+                edgecolors='b', label=r'$T_{\rm{pred}}$')
+    plt.xlabel(r'$reactor\:length\:/\:\rm{m}$')
+    plt.ylabel(r'$temperature\:/\:\rm{T}$')
+    plt.ylim(analytical_solution_T[0],analytical_solution_T[-1])
+    plt.legend(loc='center right')
+    
+    if save_plot:
+        plt.savefig(f'{folder_path}/temperature_{plt_num}.png', dpi=200)
+        plt.close()
+        
+    # Plot weighting factors from causal training
+    if weight_factors is not None:
+        plt.figure()
+        plt.plot(reactor_lengths, weight_factors.detach().numpy(), 'r-', \
+                 label=f'$sum:\:{np.round(np.sum(weight_factors.detach().numpy()),decimals=4)}$')
+        plt.xlabel(r'$reactor\:length\:/\:\rm{m}$')
+        plt.ylabel(r'$causal\:weighting\:factor$')
+        plt.ylim(0,1)
+        plt.legend(loc='upper right')
+        
+        if save_plot:
+            plt.savefig(f'{folder_path}/causal_weights_{plt_num}.png', dpi=200)
+            plt.close()
+    
+    # Plot losses without weighting factors
+    if loss_values is not None:
+        plt.figure()
+        epochs = list(range(1, len(loss_values[0])+1))
+        plt.plot(epochs, loss_values[0][:,0], '-', label=r'$L_{\rm{total}}$')
+        plt.plot(epochs, loss_values[0][:,1], '-', label=r'$L_{\rm{IC,CH_{4}}}$')
+        plt.plot(epochs, loss_values[0][:,2], '-', label=r'$L_{\rm{IC,H_{2}O}}$')
+        plt.plot(epochs, loss_values[0][:,3], '-', label=r'$L_{\rm{IC,H_{2}}}$')
+        plt.plot(epochs, loss_values[0][:,4], '-', label=r'$L_{\rm{IC,CO}}$')
+        plt.plot(epochs, loss_values[0][:,5], '-', label=r'$L_{\rm{IC,CO_{2}}}$')
+        plt.plot(epochs, loss_values[0][:,6], '-', label=r'$L_{\rm{IC,T}}$')
+        plt.plot(epochs, loss_values[0][:,7], '--', label=r'$L_{\rm{GE,CH_{4}}}$')
+        plt.plot(epochs, loss_values[0][:,8], '--', label=r'$L_{\rm{GE,H_{2}O}}$')
+        plt.plot(epochs, loss_values[0][:,9], '--', label=r'$L_{\rm{GE,H_{2}}}$')
+        plt.plot(epochs, loss_values[0][:,10], '--', label=r'$L_{\rm{GE,CO}}$')
+        plt.plot(epochs, loss_values[0][:,11], '--', label=r'$L_{\rm{GE,CO_{2}}}$')
+        plt.plot(epochs, loss_values[0][:,12], '--', label=r'$L_{\rm{GE,T}}$')
+        
+        plt.xlabel(r'$Number\:of\:epochs$')
+        plt.ylabel(r'$losses$')
+        plt.yscale('log')
+        plt.legend(loc='center right')
+        
+        if save_plot:
+            plt.savefig(f'{folder_path}/loss_values_{plt_num}.png', dpi=200)
+            plt.close()
+    
+    # Plot the MSD between the analytical solution and the prediction by the 
+    # neural network
+    if msd_NN is not None:
+        plt.figure()
+        plt.plot(list(range(1, len(loss_values)+1)), msd_NN[:,0], label=r'$MSD\rm{(}x_{\rm{A}}\rm{)}$')
+        plt.plot(list(range(1, len(loss_values)+1)), msd_NN[:,1], label=r'$MSD\rm{(}x_{\rm{B}}\rm{)}$')
+        plt.plot(list(range(1, len(loss_values)+1)), msd_NN[:,2], label=r'$MSD\rm{(}T\rm{)}$')
+        plt.xlabel(r'$Number\:of\:epochs$')
+        plt.ylabel(r'$MSD$')
+        plt.yscale('log')
+        plt.legend(loc='center right')
+        
+        if save_plot:
+            plt.savefig(f'{folder_path}/msd_{plt_num}.png', dpi=200)
+            plt.close()
         
 if __name__ == "__main__":
     # Define parameters for the model
@@ -825,8 +1018,8 @@ if __name__ == "__main__":
     hidden_size_NN = 32
     output_size_NN = 6
     num_layers_NN = 3
-    num_epochs = 100
-    weight_factors = [1,1,1,1,1,1] #w_n,w_T,w_GE_n,w_GE_T,w_IC_n,w_IC_T
+    num_epochs = 300
+    weight_factors = [1e2,1,1,1,1,1] #w_n,w_T,w_GE_n,w_GE_T,w_IC_n,w_IC_T
     epsilon = 0 #epsilon=0: old model, epsilon!=0: new model, optimized value: 2
     plot_interval = 10 # Plotting during NN-training
     
@@ -834,6 +1027,14 @@ if __name__ == "__main__":
     # Calculation of the analytical curves
     model = generate_data(inlet_mole_fractions, bound_conds, reactor_conds)
     model.solve_ode(reactor_lengths, plot=plot_analytical_solution)
+    
+    analytical_solution_x_CH4 = model.x_CH4
+    analytical_solution_x_H20 = model.x_H2O
+    analytical_solution_x_H2 = model.x_H2
+    analytical_solution_x_CO = model.x_CO
+    analytical_solution_x_CO2 = model.x_CO2
+    analytical_solution_x_N2 = model.x_N2
+    analytical_solution_T = model.T
     
     # Set up the neural network
     network = NeuralNetwork(input_size_NN=input_size_NN, hidden_size_NN=hidden_size_NN,\
@@ -849,12 +1050,30 @@ if __name__ == "__main__":
     # Train the neural network
     calc_loss = PINN_loss(weight_factors, epsilon, inlet_mole_fractions, \
                           bound_conds, reactor_conds) 
-    loss_values = train(x, y, network, calc_loss, optimizer, num_epochs)
+        
+    loss_values = train(x, y, network, calc_loss, optimizer, num_epochs, analytical_solution_x_CH4, \
+              analytical_solution_x_H20, analytical_solution_x_H2, analytical_solution_x_CO, \
+              analytical_solution_x_CO2, analytical_solution_x_N2, analytical_solution_T, \
+              model.n_N2_0, plot_interval)
 
     # Predict data with the trained neural network
     y_pred = network(x)
     # Convert the pytorch tensor to a numpy array
     y_pred = y_pred.detach().numpy()
+    # Add the amount of substance from N2 to the the predicted data because N2 
+    # is not taken into account in the neural network (N2 stays constant)
+    y_pred = np.insert(y_pred, 2, model.n_N2_0, axis=1)
+    # Extract mole fractions
+    predicted_x_CH4, predicted_x_H20, predicted_x_H2, predicted_x_CO, \
+        predicted_x_CO2, predicted_x_N2 = calc_mole_frac(y_pred[:,:6])
+    predicted_T = y_pred[:, 6]
+    
+    # Plot the mole fraction, temperature and weighting factors    
+    plots(reactor_lengths, analytical_solution_x_CH4, analytical_solution_x_H20, \
+          analytical_solution_x_H2, analytical_solution_x_CO, analytical_solution_x_CO2, \
+          analytical_solution_x_N2, analytical_solution_T, predicted_x_CH4, predicted_x_H20, \
+          predicted_x_H2, predicted_x_CO, predicted_x_CO2, predicted_x_N2, predicted_T, \
+          plt_num = f'{num_epochs}_final', save_plot = True, loss_values=loss_values)
     
     # Save model parameters
     #torch.save(network.state_dict(), 'PINN_state_03.10.23.pth')

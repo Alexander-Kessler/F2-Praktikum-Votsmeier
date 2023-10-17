@@ -1057,7 +1057,7 @@ if __name__ == "__main__":
     hidden_size_NN = 32
     output_size_NN = 6
     num_layers_NN = 3
-    num_epochs = 500
+    num_epochs = 1000
     weight_factors = [1e1,1,1,1,1,1] #w_n,w_T,w_GE_n,w_GE_T,w_IC_n,w_IC_T
     epsilon = 0.05 #epsilon=0: old model, epsilon!=0: new model
     plot_interval = 10 # Plotting during NN-training

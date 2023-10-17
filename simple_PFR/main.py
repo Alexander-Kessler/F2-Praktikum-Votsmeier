@@ -225,7 +225,6 @@ class generate_data():
         if plot:
             generate_data.plot(self, reactor_lengths, thermo_state)
             
-        return y
     
     def plot(self, reactor_lengths, thermo_state):
         """

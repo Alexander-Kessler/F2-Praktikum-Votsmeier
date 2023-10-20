@@ -9,7 +9,7 @@ import os
 import re
 
 # Input Parameter
-path = "/home/alexander/Dokumente/F2_Praktikum_Python/plots"
+path = "/home/alexander/Dokumente/F2_Praktikum_Python/simple_PFR/plots"
 prefix = "temperature" #causal_weights,mole_fraction,temperature
 
 def extract_number(filename):

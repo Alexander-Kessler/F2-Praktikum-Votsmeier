@@ -719,8 +719,8 @@ def plots(reactor_lengths, analytical_solution_x_A, analytical_solution_x_B, \
     plt.scatter(reactor_lengths, predicted_T, color = 'g', s=12, alpha=0.8, \
                 edgecolors='b', label=r'$T_{\rm{pred}}$')
     plt.xlabel(r'$reactor\:length\:/\:\rm{m}$')
-    plt.ylabel(r'$temperature\:/\:\rm{T}$')
-    plt.ylim(500,700)
+    plt.ylabel(r'$temperature\:/\:\rm{K}$')
+    plt.ylim(500,650)
     plt.legend(loc='center right')
     
     if save_plot:
@@ -792,7 +792,7 @@ if __name__ == "__main__":
     hidden_size_NN = 32
     output_size_NN = 3
     num_layers_NN = 3
-    num_epochs = 1000
+    num_epochs = 500
     weight_factors = [1e3,1,1,1,1,1] #w_AB,w_T,w_GE_AB,w_GE_T,w_IC_AB,w_IC_T
     epsilon = 0 #epsilon=0: old model, epsilon!=0: new model, optimized value: 2
     plot_interval = 10 # Plotting during NN-training

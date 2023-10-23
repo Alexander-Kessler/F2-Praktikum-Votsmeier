@@ -366,15 +366,18 @@ class generate_data():
         plt.plot(reactor_lengths, self.x_H2, '-', label=r'$x_{\rm{H_{2}}}$')
         plt.plot(reactor_lengths, self.x_CO, '-', label=r'$x_{\rm{CO}}$')
         plt.plot(reactor_lengths, self.x_CO2, '-', label=r'$x_{\rm{CO_{2}}}$')
-        plt.xlabel('reactor length')
-        plt.ylabel('mole fractions')
+        plt.xlabel(r'$reactor\:length\:/\:\rm{m}$')
+        plt.ylabel(r'$mole\:fractions$')
+        plt.ylim(0,0.75)
+        plt.xlim(reactor_lengths[0],reactor_lengths[-1])
         plt.legend(loc='center right')
         
         # Temperature plot
         plt.figure()
         plt.plot(reactor_lengths, self.T, 'r-', label='temperature')
-        plt.xlabel('reactor length')
-        plt.ylabel('temperature')
+        plt.xlabel(r'$reactor\:length\:/\:\rm{m}$')
+        plt.ylabel(r'$temperature\:/\:\rm{K}$')
+        plt.xlim(reactor_lengths[0],reactor_lengths[-1])
 
         
 class NeuralNetwork(torch.nn.Module):
@@ -694,8 +697,8 @@ class PINN_loss(torch.nn.Module):
         
         ## Calculate the differentials
         # Calculate the mole fractions
-        self.mole_fractions = torch.cat([y_pred[:,:5], model.n_N2_0*torch.ones(100, 1)], dim=1)/ \
-            torch.sum(torch.cat([y_pred[:,:5], model.n_N2_0*torch.ones(100, 1)], dim=1), dim=1).view(-1, 1)
+        self.mole_fractions = torch.cat([y_pred[:,:5], self.n_N2_0*torch.ones(100, 1)], dim=1)/ \
+            torch.sum(torch.cat([y_pred[:,:5], self.n_N2_0*torch.ones(100, 1)], dim=1), dim=1).view(-1, 1)
                 
         # Consider dependence of temperature and gas composition of the flow velocity
         u_gas = self.u * (self.T/self.T0.expand(self.T.size(0), 1)) * (torch.sum(torch.unsqueeze( \
@@ -983,6 +986,7 @@ def plots(reactor_lengths, analytical_solution_x_CH4, analytical_solution_x_H20,
     plt.xlabel(r'$reactor\:length\:/\:\rm{m}$')
     plt.ylabel(r'$mole\:fractions$')
     plt.ylim(0,0.75)
+    plt.xlim(reactor_lengths[0],reactor_lengths[-1])
     plt.legend(loc='center right')
         
     if save_plot:
@@ -995,8 +999,9 @@ def plots(reactor_lengths, analytical_solution_x_CH4, analytical_solution_x_H20,
     plt.scatter(reactor_lengths, predicted_T, color = 'g', s=12, alpha=0.8, \
                 edgecolors='b', label=r'$T_{\rm{pred}}$')
     plt.xlabel(r'$reactor\:length\:/\:\rm{m}$')
-    plt.ylabel(r'$temperature\:/\:\rm{T}$')
+    plt.ylabel(r'$temperature\:/\:\rm{K}$')
     plt.ylim(analytical_solution_T[0],analytical_solution_T[-1])
+    plt.xlim(reactor_lengths[0],reactor_lengths[-1])
     plt.legend(loc='center right')
     
     if save_plot:
@@ -1011,6 +1016,7 @@ def plots(reactor_lengths, analytical_solution_x_CH4, analytical_solution_x_H20,
         plt.xlabel(r'$reactor\:length\:/\:\rm{m}$')
         plt.ylabel(r'$causal\:weighting\:factor$')
         plt.ylim(0,1)
+        plt.xlim(reactor_lengths[0],reactor_lengths[-1])
         plt.legend(loc='upper right')
         
         if save_plot:
@@ -1038,6 +1044,7 @@ def plots(reactor_lengths, analytical_solution_x_CH4, analytical_solution_x_H20,
         plt.xlabel(r'$Number\:of\:epochs$')
         plt.ylabel(r'$losses$')
         plt.yscale('log')
+        plt.xlim(0,epochs[-1])
         plt.legend(loc='center right')
         
         if save_plot:
@@ -1057,7 +1064,7 @@ if __name__ == "__main__":
     hidden_size_NN = 32
     output_size_NN = 6
     num_layers_NN = 3
-    num_epochs = 1000
+    num_epochs = 800
     weight_factors = [1e1,1,1,1,1,1] #w_n,w_T,w_GE_n,w_GE_T,w_IC_n,w_IC_T
     epsilon = 0.05 #epsilon=0: old model, epsilon!=0: new model
     plot_interval = 10 # Plotting during NN-training

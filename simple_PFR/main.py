@@ -233,15 +233,19 @@ class generate_data():
         plt.figure()
         plt.plot(reactor_lengths, self.x_A, 'b-', label='xA')
         plt.plot(reactor_lengths, self.x_B, 'r-', label='xB')
-        plt.xlabel('reactor length')
-        plt.ylabel('mole fractions')
+        plt.xlabel(r'$reactor\:length\:/\:\rm{m}$')
+        plt.ylabel(r'$mole\:fractions$')
         plt.legend()
+        plt.ylim(self.x_B[0],self.x_A[0])
+        plt.xlim(reactor_lengths[0],reactor_lengths[-1])
         plt.title(thermo_state)
         
         plt.figure()
         plt.plot(reactor_lengths, self.T, 'r-', label='temperature')
-        plt.xlabel('reactor length')
-        plt.ylabel('temperature')
+        plt.xlabel(r'$reactor\:length\:/\:\rm{m}$')
+        plt.ylabel(r'$temperature\:/\:\rm{K}$')
+        plt.ylim(500,650)
+        plt.xlim(reactor_lengths[0],reactor_lengths[-1])
         plt.title(thermo_state)
 
 class NeuralNetwork(torch.nn.Module):
@@ -706,7 +710,8 @@ def plots(reactor_lengths, analytical_solution_x_A, analytical_solution_x_B, \
                 edgecolors='b', label=r'$x_{\rm{B,pred}}$')
     plt.xlabel(r'$reactor\:length\:/\:\rm{m}$')
     plt.ylabel(r'$mole\:fractions$')
-    plt.ylim(analytical_solution_x_A[0],analytical_solution_x_A[-1])
+    plt.ylim(analytical_solution_x_B[0],analytical_solution_x_A[0])
+    plt.xlim(reactor_lengths[0],reactor_lengths[-1])
     plt.legend(loc='center right')
         
     if save_plot:
@@ -721,6 +726,7 @@ def plots(reactor_lengths, analytical_solution_x_A, analytical_solution_x_B, \
     plt.xlabel(r'$reactor\:length\:/\:\rm{m}$')
     plt.ylabel(r'$temperature\:/\:\rm{K}$')
     plt.ylim(500,650)
+    plt.xlim(reactor_lengths[0],reactor_lengths[-1])
     plt.legend(loc='center right')
     
     if save_plot:
@@ -735,6 +741,7 @@ def plots(reactor_lengths, analytical_solution_x_A, analytical_solution_x_B, \
         plt.xlabel(r'$reactor\:length\:/\:\rm{m}$')
         plt.ylabel(r'$causal\:weighting\:factor$')
         plt.ylim(0,1)
+        plt.xlim(reactor_lengths[0],reactor_lengths[-1])
         plt.legend(loc='upper right')
         
         if save_plot:
@@ -754,6 +761,7 @@ def plots(reactor_lengths, analytical_solution_x_A, analytical_solution_x_B, \
         plt.xlabel(r'$Number\:of\:epochs$')
         plt.ylabel(r'$losses$')
         plt.yscale('log')
+        plt.xlim(0,len(loss_values))
         plt.legend(loc='center right')
         
         if save_plot:
@@ -770,6 +778,7 @@ def plots(reactor_lengths, analytical_solution_x_A, analytical_solution_x_B, \
         plt.xlabel(r'$Number\:of\:epochs$')
         plt.ylabel(r'$MSD$')
         plt.yscale('log')
+        plt.xlim(0,len(loss_values))
         plt.legend(loc='center right')
         
         if save_plot:
@@ -794,7 +803,7 @@ if __name__ == "__main__":
     num_layers_NN = 3
     num_epochs = 500
     weight_factors = [1e3,1,1,1,1,1] #w_AB,w_T,w_GE_AB,w_GE_T,w_IC_AB,w_IC_T
-    epsilon = 0 #epsilon=0: old model, epsilon!=0: new model, optimized value: 2
+    epsilon = 2 #epsilon=0: old model, epsilon!=0: new model, optimized value: 2
     plot_interval = 10 # Plotting during NN-training
     
     # Calculation of the analytical curves

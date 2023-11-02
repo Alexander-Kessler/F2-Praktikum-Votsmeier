@@ -987,7 +987,7 @@ def plots(reactor_lengths, analytical_solution_x_CH4, analytical_solution_x_H20,
     plt.ylabel(r'$mole\:fractions$')
     plt.ylim(0,0.75)
     plt.xlim(reactor_lengths[0],reactor_lengths[-1])
-    plt.legend(loc='center right')
+    plt.legend(bbox_to_anchor=(1.04, 0.5), loc="center left", borderaxespad=0)
         
     if save_plot:
         plt.savefig(f'{folder_path}/mole_fraction_{plt_num}.png', dpi=200)
@@ -1045,7 +1045,7 @@ def plots(reactor_lengths, analytical_solution_x_CH4, analytical_solution_x_H20,
         plt.ylabel(r'$losses$')
         plt.yscale('log')
         plt.xlim(0,epochs[-1])
-        plt.legend(loc='center right')
+        plt.legend(bbox_to_anchor=(1.04, 0.5), loc="center left", borderaxespad=0)
         
         if save_plot:
             plt.savefig(f'{folder_path}/loss_values_{plt_num}.png', dpi=200)
@@ -1064,7 +1064,7 @@ if __name__ == "__main__":
     hidden_size_NN = 32
     output_size_NN = 6
     num_layers_NN = 3
-    num_epochs = 800
+    num_epochs = 1000
     weight_factors = [1e1,1,1,1,1,1] #w_n,w_T,w_GE_n,w_GE_T,w_IC_n,w_IC_T
     epsilon = 0.05 #epsilon=0: old model, epsilon!=0: new model
     plot_interval = 10 # Plotting during NN-training
